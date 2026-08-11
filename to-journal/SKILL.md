@@ -35,11 +35,25 @@ entry is a separate, structured record on disk, not what you paste.
 
 ## Paths
 
-Relative to the project root (the current working directory when the
-skill runs):
+The project root is **resolved**, never assumed to be the current
+working directory. cwd is often a subfolder (e.g.
+`development/03_logbook/` during a logbook session); writing `journal/`
+relative to cwd would spawn a stray `journal/` there. So before any path
+operation, resolve the project root as the nearest ancestor of cwd
+(inclusive) that contains a `CLAUDE.md`:
 
-- Journal folder: `journal/`
-- Today's file: `journal/YYMMDD_journal.md` (YYMMDD = today, no week
+```bash
+ROOT="$PWD"
+while [ "$ROOT" != "/" ] && [ ! -f "$ROOT/CLAUDE.md" ]; do
+  ROOT="$(dirname "$ROOT")"
+done
+[ -f "$ROOT/CLAUDE.md" ] || { echo 'to-journal: CLAUDE.md not found above cwd — cannot resolve project root' >&2; exit 1; }
+```
+
+All paths below are absolute under `$ROOT`:
+
+- Journal folder: `$ROOT/journal/`
+- Today's file: `$ROOT/journal/YYMMDD_journal.md` (YYMMDD = today, no week
   suffix — this is a session log, not a `YYMMDD_WW-YY_` report per
   CLAUDE.md)
 
@@ -85,19 +99,22 @@ TRANSCRIPT=$(find ~/.claude/projects -name "$SID.jsonl" 2>/dev/null | head -1)
    asked, what was done/decided, what files changed, what's left open.
    Bullet points, not prose (per CLAUDE.md house style).
 
-5. **Locate or create the `journal/` folder** in the project root:
+5. **Resolve the project root** into `$ROOT` (see Paths — do this once,
+   before any file operation), then **locate or create the `journal/`
+   folder** under it:
    ```bash
-   [ -d journal ] || mkdir journal
+   [ -d "$ROOT/journal" ] || mkdir "$ROOT/journal"
    ```
 
-6. **Check whether `journal/YYMMDD_journal.md` already exists** for
-   today's date.
+6. Set `JFILE="$ROOT/journal/YYMMDD_journal.md"`. **Check whether
+   `$JFILE` already exists** for today's date.
 
-   - **Does not exist:** create the file with a top header and one
-     entry (first-entry template below).
+   - **Does not exist:** create the file (Write) with a top header and
+     one entry (first-entry template below). Pass the absolute path
+     `$JFILE` to Write/Edit.
    - **Exists:** append a new `## Entry — HH:MM:SS` section to the
-     bottom of the file (use Edit, not Write, so earlier entries are
-     preserved verbatim). Separate entries with a `---` rule
+     bottom of the file (use Edit on `$JFILE`, not Write, so earlier
+     entries are preserved verbatim). Separate entries with a `---` rule
      (subsequent-entry template below).
 
    **Template (first entry / whole new file):**
@@ -124,11 +141,12 @@ TRANSCRIPT=$(find ~/.claude/projects -name "$SID.jsonl" 2>/dev/null | head -1)
    ```
 
 7. **Extract your last response before this `/to-journal` call and copy
-   it to the clipboard.** The `/to-journal` invocation is the last real
-   (non-tool-result) user message in the transcript; the assistant text
-   immediately before it is the final reply of the previous turn — i.e.
-   your last response. Extract it from the transcript JSONL and pipe it
-   to `pbcopy`:
+   it to the clipboard.** The response to copy is the assistant text
+   immediately **before the human message that invokes `/to-journal`** —
+   whether `/to-journal` is called standalone (`/to-journal`) **or chained
+   inside another command** (e.g. `/to-logbook` with args `and then
+   /to-journal`). Extract it from the transcript JSONL and pipe it to
+   `pbcopy`:
 
    ```bash
    SID="$CLAUDE_CODE_SESSION_ID"
@@ -169,8 +187,17 @@ TRANSCRIPT=$(find ~/.claude/projects -name "$SID.jsonl" 2>/dev/null | head -1)
                    msgs.append(('assistant', text))
    except FileNotFoundError:
        msgs = []
-   # trigger = last real human message (the /to-journal call)
-   human_idx = [i for i, (k, _) in enumerate(msgs) if k == 'human']
+   # trigger = the human message that invokes /to-journal — standalone
+   # ("/to-journal") OR chained inside another command (e.g. "/to-logbook"
+   # with args "and then /to-journal"). Skill bodies are injected as
+   # user-role text messages beginning with "Base directory for this skill:";
+   # they are NOT human commands and MUST be excluded, otherwise the
+   # trigger becomes the to-journal skill body and the walk-back grabs the
+   # chained skill's narration ("Now chaining to /to-journal:") instead of
+   # the real reply.
+   def is_journal_call(txt):
+       return '/to-journal' in txt and not txt.startswith('Base directory for this skill:')
+   human_idx = [i for i, (k, txt) in enumerate(msgs) if k == 'human' and is_journal_call(txt)]
    if not human_idx:
        print('(No prior response found — transcript unreadable or empty.)')
    else:
@@ -187,8 +214,10 @@ TRANSCRIPT=$(find ~/.claude/projects -name "$SID.jsonl" 2>/dev/null | head -1)
    printf '%s' "$LASTRESP" | pbcopy && echo "pbcopy OK"
    ```
 
-   The extraction only ever looks at messages **before** the trigger, so
-   the skill's own narration/tool calls during this turn are never
+   The trigger is the human `/to-journal` call itself, and the extraction
+   only ever looks at messages **before** that call — so the skill's own
+   narration/tool calls during this turn, the chained skill's body, and
+   any chaining narration ("Now chaining to `/to-journal`:") are never
    copied. If the session has no prior assistant response (e.g.
    `/to-journal` was the first message), a clear fallback string is
    copied instead.
