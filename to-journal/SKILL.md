@@ -8,7 +8,8 @@ description: Write a dated journal entry for this session to journal/YYMMDD_jour
 You type `/to-journal`. No arguments. I do two things:
 
 1. **Durable memory:** write a dated journal entry for this session to
-   `journal/YYMMDD_journal.md` in the project root.
+   `journal/YYMMDD_journal.md` in the **main project root** (the git
+   repository top-level — never a subproject root, see Paths).
 2. **Continuation aid:** copy **your last response before this
    `/to-journal` call** to the clipboard via `pbcopy`, so you can paste
    it into the next session (after `/clear`) and continue seamlessly.
@@ -38,17 +39,33 @@ entry is a separate, structured record on disk, not what you paste.
 The project root is **resolved**, never assumed to be the current
 working directory. cwd is often a subfolder (e.g.
 `development/03_logbook/` during a logbook session); writing `journal/`
-relative to cwd would spawn a stray `journal/` there. So before any path
-operation, resolve the project root as the nearest ancestor of cwd
-(inclusive) that contains a `CLAUDE.md`:
+relative to cwd would spawn a stray `journal/` there.
+
+The journal always lives at the **main project root** — the git
+repository top-level — even when the session works inside a subproject
+that has its own `CLAUDE.md` (subproject roots exist so `/to-spec`,
+`/to-tickets` and `/to-logbook` write development documents to the right
+place; the journal is deliberately exempt — one journal per repository,
+so a day's record never splits across folders). Resolve it with git,
+falling back to the nearest `CLAUDE.md` ancestor of cwd when outside a
+git repository:
 
 ```bash
-ROOT="$PWD"
-while [ "$ROOT" != "/" ] && [ ! -f "$ROOT/CLAUDE.md" ]; do
-  ROOT="$(dirname "$ROOT")"
-done
-[ -f "$ROOT/CLAUDE.md" ] || { echo 'to-journal: CLAUDE.md not found above cwd — cannot resolve project root' >&2; exit 1; }
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -z "$ROOT" ]; then
+  ROOT="$PWD"
+  while [ "$ROOT" != "/" ] && [ ! -f "$ROOT/CLAUDE.md" ]; do
+    ROOT="$(dirname "$ROOT")"
+  done
+  [ -f "$ROOT/CLAUDE.md" ] || { echo 'to-journal: no git repo and no CLAUDE.md above cwd — cannot resolve project root' >&2; exit 1; }
+fi
 ```
+
+Note: `git rev-parse` must run in the session's *launch* directory, not
+wherever the shell's persistent cwd has drifted — a `cd` into a nested
+git repo during the session would otherwise re-root the journal there.
+If in doubt, resolve `$ROOT` from the session's original working
+directory (the environment block's "Primary working directory").
 
 All paths below are absolute under `$ROOT`:
 
@@ -99,9 +116,10 @@ TRANSCRIPT=$(find ~/.claude/projects -name "$SID.jsonl" 2>/dev/null | head -1)
    asked, what was done/decided, what files changed, what's left open.
    Bullet points, not prose (per CLAUDE.md house style).
 
-5. **Resolve the project root** into `$ROOT` (see Paths — do this once,
-   before any file operation), then **locate or create the `journal/`
-   folder** under it:
+5. **Resolve the main project root** into `$ROOT` (see Paths — do this
+   once, before any file operation, and from the session's launch
+   directory, not a drifted shell cwd), then **locate or create the
+   `journal/` folder** under it:
    ```bash
    [ -d "$ROOT/journal" ] || mkdir "$ROOT/journal"
    ```
