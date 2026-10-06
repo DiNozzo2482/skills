@@ -74,14 +74,36 @@ All paths below are absolute under `$ROOT`:
   suffix — this is a session log, not a `YYMMDD_WW-YY_` report per
   CLAUDE.md)
 
-The session transcript (used to extract your last response) lives at
-`~/.claude/projects/<project-slug>/<session-id>.jsonl`. Its path is
-found by session ID, not hardcoded:
+## Environment detection — Claude Code vs. pi
+
+This skill runs under two harnesses with different env vars and
+transcript formats. Detect which one you are in **once, at the start**,
+and branch every session-ID / transcript / model step on the result:
 
 ```bash
-SID="$CLAUDE_CODE_SESSION_ID"
-TRANSCRIPT=$(find ~/.claude/projects -name "$SID.jsonl" 2>/dev/null | head -1)
+if [ -n "$PI_SESSION_FILE" ]; then
+  HARNESS=pi
+  SID="$PI_SESSION_ID"
+  TRANSCRIPT="$PI_SESSION_FILE"          # pi hands us the path directly
+elif [ -n "$CLAUDE_CODE_SESSION_ID" ]; then
+  HARNESS=claude
+  SID="$CLAUDE_CODE_SESSION_ID"
+  TRANSCRIPT=$(find ~/.claude/projects -name "$SID.jsonl" 2>/dev/null | head -1)
+else
+  echo 'to-journal: neither PI_SESSION_FILE nor CLAUDE_CODE_SESSION_ID set — unknown harness' >&2
+  exit 1
+fi
 ```
+
+| | Claude Code | pi |
+|---|---|---|
+| Session ID | `$CLAUDE_CODE_SESSION_ID` | `$PI_SESSION_ID` |
+| Transcript | `~/.claude/projects/<slug>/<sid>.jsonl` (found via `find`) | `$PI_SESSION_FILE` (exact path, no lookup) |
+| Model name | read from the session's environment block (step 3) | `$PI_MODEL` (+ `$PI_PROVIDER`) |
+| JSONL shape | top-level `"type": "user" \| "assistant"` | `"type": "message"` with `message.role` = `user` \| `assistant` \| `toolResult` |
+
+The step-7 extraction script handles both shapes — feed it
+`$TRANSCRIPT` and it branches internally.
 
 ## What I do
 
@@ -91,25 +113,31 @@ TRANSCRIPT=$(find ~/.claude/projects -name "$SID.jsonl" 2>/dev/null | head -1)
    date +%H:%M:%S    # → time of the record
    ```
 
-2. **Get the session ID** — read the `CLAUDE_CODE_SESSION_ID` env var:
-   ```bash
-   echo "$CLAUDE_CODE_SESSION_ID"
-   ```
-   This matches the session's own transcript file (see Paths).
+2. **Detect the harness and get the session ID** — run the detection
+   block under "Environment detection" above. It sets `$HARNESS`,
+   `$SID`, and `$TRANSCRIPT` from `PI_SESSION_FILE`/`PI_SESSION_ID`
+   (pi) or `CLAUDE_CODE_SESSION_ID` (Claude Code). `$SID` matches the
+   session's own transcript file and goes into the journal entry.
 
-3. **Get the model name** — read it from this session's own environment
-   block, not from a tool call. Every session's environment block
-   includes a line of the form:
-   > "You are powered by the model glm-5.2."
-   or
-   > "You are powered by the model named **Sonnet 5**. The exact model
-   > ID is **claude-sonnet-5**."
+3. **Get the model name** — branch on `$HARNESS`:
 
-   Capture whatever that line states — a bare name (`glm-5.2`) or a
-   friendly name + exact ID pair (`Sonnet 5 (claude-sonnet-5)`). There
-   is no tool that returns this — read it directly from context. Do
-   **not** assume an Anthropic model; this workspace may run against a
-   non-Anthropic endpoint (Zhipu GLM, Aliyun, etc.).
+   - **pi:** read the env vars — no context reading needed:
+     ```bash
+     echo "$PI_MODEL ($PI_PROVIDER, via pi)"   # e.g. "k3-256k (kimi-coding, via pi)"
+     ```
+   - **Claude Code:** read it from this session's own environment
+     block, not from a tool call. Every session's environment block
+     includes a line of the form:
+     > "You are powered by the model glm-5.2."
+     or
+     > "You are powered by the model named **Sonnet 5**. The exact model
+     > ID is **claude-sonnet-5**."
+
+     Capture whatever that line states — a bare name (`glm-5.2`) or a
+     friendly name + exact ID pair (`Sonnet 5 (claude-sonnet-5)`).
+     There is no tool that returns this — read it directly from
+     context. Do **not** assume an Anthropic model; this workspace may
+     run against a non-Anthropic endpoint (Zhipu GLM, Aliyun, etc.).
 
 4. **Summarize the session** in 3-8 concise bullet points covering:
    major decisions, findings, results, and actions. Note what was
@@ -141,7 +169,7 @@ TRANSCRIPT=$(find ~/.claude/projects -name "$SID.jsonl" 2>/dev/null | head -1)
 
    ## Entry — HH:MM:SS
    - **Model:** <name from step 3>
-   - **Session ID:** <value of $CLAUDE_CODE_SESSION_ID>
+   - **Session ID:** <value of $SID>
 
    <3-8 bullet points summarizing the session>
    ```
@@ -153,7 +181,7 @@ TRANSCRIPT=$(find ~/.claude/projects -name "$SID.jsonl" 2>/dev/null | head -1)
 
    ## Entry — HH:MM:SS
    - **Model:** <name from step 3>
-   - **Session ID:** <value of $CLAUDE_CODE_SESSION_ID>
+   - **Session ID:** <value of $SID>
 
    <3-8 bullet points summarizing the session>
    ```
@@ -164,11 +192,10 @@ TRANSCRIPT=$(find ~/.claude/projects -name "$SID.jsonl" 2>/dev/null | head -1)
    whether `/to-journal` is called standalone (`/to-journal`) **or chained
    inside another command** (e.g. `/to-logbook` with args `and then
    /to-journal`). Extract it from the transcript JSONL and pipe it to
-   `pbcopy`:
+   `pbcopy`. `$TRANSCRIPT` comes from the detection block (see
+   "Environment detection"); the parser below handles both JSONL shapes:
 
    ```bash
-   SID="$CLAUDE_CODE_SESSION_ID"
-   TRANSCRIPT=$(find ~/.claude/projects -name "$SID.jsonl" 2>/dev/null | head -1)
    LASTRESP=$(python3 - "$TRANSCRIPT" <<'PY'
    import sys, json
    path = sys.argv[1]
@@ -184,9 +211,21 @@ TRANSCRIPT=$(find ~/.claude/projects -name "$SID.jsonl" 2>/dev/null | head -1)
                except Exception:
                    continue
                t = o.get('type')
-               if t not in ('user', 'assistant'):
+               if t == 'message':
+                   # pi shape: {"type":"message","message":{"role":"user"|"assistant"|"toolResult",...}}
+                   m = o.get('message') or {}
+                   role = m.get('role')
+                   if role == 'toolResult':
+                       continue
+                   if role not in ('user', 'assistant'):
+                       continue
+                   content = m.get('content')
+               elif t in ('user', 'assistant'):
+                   # Claude Code shape: {"type":"user"|"assistant","message":{"content":...}}
+                   role = t
+                   content = (o.get('message') or {}).get('content')
+               else:
                    continue
-               content = (o.get('message') or {}).get('content')
                parts, is_tool_result = [], False
                if isinstance(content, str):
                    parts.append(content)
@@ -199,9 +238,9 @@ TRANSCRIPT=$(find ~/.claude/projects -name "$SID.jsonl" 2>/dev/null | head -1)
                        elif b.get('type') == 'tool_result':
                            is_tool_result = True
                text = '\n'.join(p for p in parts if p)
-               if t == 'user' and not is_tool_result:
+               if role == 'user' and not is_tool_result:
                    msgs.append(('human', text))
-               elif t == 'assistant' and text.strip():
+               elif role == 'assistant' and text.strip():
                    msgs.append(('assistant', text))
    except FileNotFoundError:
        msgs = []
@@ -214,6 +253,10 @@ TRANSCRIPT=$(find ~/.claude/projects -name "$SID.jsonl" 2>/dev/null | head -1)
    # chained skill's narration ("Now chaining to /to-journal:") instead of
    # the real reply.
    def is_journal_call(txt):
+       # Claude Code injects skill bodies as user-role text beginning with
+       # "Base directory for this skill:"; pi injects the skill body as a
+       # <skill name="to-journal" ...> XML block inside the invoking message
+       # itself — that block IS the call, so it must stay eligible.
        return '/to-journal' in txt and not txt.startswith('Base directory for this skill:')
    human_idx = [i for i, (k, txt) in enumerate(msgs) if k == 'human' and is_journal_call(txt)]
    if not human_idx:
@@ -247,11 +290,12 @@ TRANSCRIPT=$(find ~/.claude/projects -name "$SID.jsonl" 2>/dev/null | head -1)
 
 ## Gotcha — `/copy` and `/clear` cannot be triggered programmatically
 
-There is no tool that lets the agent invoke `/copy` or `/clear`. Both
-are client-side REPL commands handled by the Claude Code CLI itself when
-*you* type them; text the model outputs (even the literal string
-`/copy` or `/clear`) is not intercepted as a command. Confirmed directly
-against the installed CLI binary:
+There is no tool that lets the agent invoke `/copy` or `/clear`. In
+Claude Code both are client-side REPL commands handled by the CLI
+itself when *you* type them; pi's REPL commands are likewise
+client-side. Text the model outputs (even the literal string `/copy`
+or `/clear`) is not intercepted as a command. Confirmed directly
+against the installed Claude Code binary:
 ```
 grep -a -o 'name:"copy"[^}]\{0,200\}' claude
 # → name:"copy",description:"Copy Claude's last response to clipboard
