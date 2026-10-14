@@ -1,6 +1,6 @@
 ---
 name: implement
-description: Work the next ticket in a ticket file — read its state, pick the frontier ticket, implement it, verify each acceptance criterion, tick only what passed, and hand off to /to-logbook.
+description: Work the next ticket in a ticket file — read its state, pick the frontier ticket, implement it, verify each acceptance criterion, tick only what passed, and hand off to the to-logbook skill (/skill:to-logbook in pi).
 disable-model-invocation: true
 ---
 
@@ -85,7 +85,9 @@ Tell the user:
 - anything surfaced that is not this ticket's job
 - the next frontier ticket, from a fresh `status` run
 
-Then run `/to-logbook` to amend the topic's Logbook, following the ticket's own **When done** line. Clear context before the next ticket.
+Then invoke the **to-logbook** skill to amend the topic's Logbook, following the ticket's own **When done** line. Clear context before the next ticket.
+
+**pi does not chain-fire slash commands from inside a skill turn.** Printing `/to-logbook` and stopping — the old Claude Code chained-invocation idiom — leaves the Logbook update to the user and it silently never happens (burned three times on SPEC-21: T1's entry got written only because the user noticed, T3's and the T2 follow-up's never fired). In pi the model must run the skill itself, in this same session: read the to-logbook SKILL.md under `~/.pi/agent/skills/` (the user-facing command is `/skill:to-logbook`) and follow it end to end before reporting the ticket closed.
 
 ---
 
